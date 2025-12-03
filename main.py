@@ -170,14 +170,42 @@ class SiteScanner:
         with open(self.output_file, 'a') as f:
             f.write(f"{url}\n")
 
-    def is_same_domain(self, base_url, target_url):
+    def normalize_url(self, url):
+        """
+        Normalize URL to avoid duplicates (e.g. trailing slashes)
+        """
         try:
-            base_domain = urlparse(base_url).netloc
-            target_domain = urlparse(target_url).netloc
-            # Handle www vs non-www
-            base_domain = base_domain.replace('www.', '')
-            target_domain = target_domain.replace('www.', '')
-            return base_domain == target_domain
+            parsed = urlparse(url)
+            # Normalize scheme and netloc to lower case
+            scheme = parsed.scheme.lower()
+            netloc = parsed.netloc.lower()
+            path = parsed.path
+            
+            # Remove trailing slash from path if present
+            if path.endswith('/') and len(path) > 1:
+                path = path[:-1]
+                
+            # Sort query params (optional, but good for strict deduplication)
+            # For now, we keep query params as is to be safe
+            
+            # Reconstruct URL
+            return f"{scheme}://{netloc}{path}" + (f"?{parsed.query}" if parsed.query else "")
+        except:
+            return url
+
+    def is_strict_scope(self, start_url, target_url):
+        """
+        Checks if target_url is within the strict scope of start_url.
+        Must match the exact hostname (no other subdomains allowed).
+        """
+        try:
+            start_parsed = urlparse(start_url)
+            target_parsed = urlparse(target_url)
+            
+            start_host = start_parsed.netloc.lower().replace('www.', '')
+            target_host = target_parsed.netloc.lower().replace('www.', '')
+            
+            return start_host == target_host
         except:
             return False
 
@@ -245,7 +273,9 @@ class SiteScanner:
 
     async def scan_site(self, context, start_url):
         queue = asyncio.Queue()
-        await queue.put((start_url, 0)) # (url, depth)
+        start_normalized = self.normalize_url(start_url)
+        await queue.put((start_url, 0))  # (url, depth)
+        queued_urls = {start_normalized}
         
         site_visited = set()
         pages_scanned = 0
@@ -255,9 +285,13 @@ class SiteScanner:
         while not queue.empty() and pages_scanned < self.max_pages_per_site:
             current_url, depth = await queue.get()
             
-            if current_url in site_visited:
+            # Normalize URL for checking
+            normalized_url = self.normalize_url(current_url)
+            
+            if normalized_url in site_visited or normalized_url in self.visited_urls:
                 continue
-            site_visited.add(current_url)
+            site_visited.add(normalized_url)
+            self.visited_urls.add(normalized_url)
             
             # Skip non-http
             if not current_url.startswith(('http://', 'https://')):
@@ -274,7 +308,7 @@ class SiteScanner:
             
             page = await context.new_page()
             
-            # APPLY STEALTH MODE (Might work less effectively on Firefox, but good to keep)
+            # APPLY STEALTH MODE
             await stealth_async(page)
 
             try:
@@ -330,11 +364,24 @@ class SiteScanner:
                     links = await page.locator('a').evaluate_all("els => els.map(e => e.href)")
                     
                     for link in links:
-                        link = link.split('#')[0].strip() 
-                        if not link: continue
+                        link = (link or "").split('#')[0].strip()
+                        if not link:
+                            continue
+                        if link.startswith(('javascript:', 'mailto:', 'tel:')):
+                            continue
 
-                        if self.is_same_domain(start_url, link) and link not in site_visited:
-                            await queue.put((link, depth + 1))
+                        # Resolve relative URLs
+                        if link.startswith(('http://', 'https://')):
+                            absolute_link = link
+                        else:
+                            absolute_link = urljoin(current_url, link)
+
+                        # Strict scope check: must be same hostname (subdomain sensitive)
+                        if self.is_strict_scope(start_url, absolute_link):
+                            norm_link = self.normalize_url(absolute_link)
+                            if norm_link not in site_visited and norm_link not in self.visited_urls and norm_link not in queued_urls:
+                                await queue.put((absolute_link, depth + 1))
+                                queued_urls.add(norm_link)
                     
                 pages_scanned += 1
 
