@@ -1,0 +1,5 @@
+playwright>=1.40.0
+colorama>=0.4.6
+openai>=1.0.0
+python-dotenv>=1.0.0
+playwright-stealth>=1.0.6
