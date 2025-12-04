@@ -399,6 +399,7 @@ class SiteScanner:
             # Use Firefox which is often less blocked by default WAF rules than Chromium
             browser = await p.firefox.launch(headless=True) 
             context = await browser.new_context(
+                ignore_https_errors=True,
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0',
                 viewport={'width': 1280, 'height': 720},
                 locale='en-US',
