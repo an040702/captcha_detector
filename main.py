@@ -292,25 +292,38 @@ class SiteScanner:
         
         site_visited = set()
         pages_scanned = 0
-        depth_start_times = {}
+        depth_deadlines = {}
         depth_timed_out = set()
+
+        async def run_with_depth_deadline(depth: int, coro, label: str):
+            if self.depth_timeout is None:
+                return await coro
+            if depth in depth_timed_out:
+                raise asyncio.TimeoutError()
+            deadline = depth_deadlines.get(depth)
+            if deadline is None:
+                deadline = time.monotonic() + self.depth_timeout
+                depth_deadlines[depth] = deadline
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                depth_timed_out.add(depth)
+                raise asyncio.TimeoutError()
+            try:
+                return await asyncio.wait_for(coro, timeout=remaining)
+            except asyncio.TimeoutError:
+                depth_timed_out.add(depth)
+                print(f"{Fore.YELLOW}[!] Depth {depth} timeout during {label}. Skipping remaining URLs at this depth.{Style.RESET_ALL}")
+                raise
         
         print(f"\n{Fore.MAGENTA}=== Starting Deep Scan for: {start_url} ==={Style.RESET_ALL}")
 
         while not queue.empty() and pages_scanned < self.max_pages_per_site:
             current_url, depth = await queue.get()
 
-            # depth timeout tracking
-            if depth not in depth_start_times:
-                depth_start_times[depth] = time.time()
-            else:
-                if depth in depth_timed_out:
-                    continue
-                depth_elapsed = time.time() - depth_start_times[depth]
-                if self.depth_timeout and depth_elapsed > self.depth_timeout:
-                    depth_timed_out.add(depth)
-                    print(f"{Fore.YELLOW}[!] Depth {depth} timeout reached ({self.depth_timeout}s). Skipping remaining URLs at this depth.{Style.RESET_ALL}")
-                    continue
+            if self.depth_timeout and depth in depth_timed_out:
+                continue
+            if self.depth_timeout and depth not in depth_deadlines:
+                depth_deadlines[depth] = time.monotonic() + self.depth_timeout
             
             # Normalize URL for checking
             normalized_url = self.normalize_url(current_url)
@@ -341,27 +354,29 @@ class SiteScanner:
             try:
                 # Load page
                 try:
-                    # Increased timeout to 60s and allow more wait time
-                    await page.goto(current_url, wait_until='domcontentloaded', timeout=60000)
+                    await run_with_depth_deadline(
+                        depth,
+                        page.goto(current_url, wait_until='domcontentloaded', timeout=60000),
+                        "page load"
+                    )
                     
-                    # Simulate Human Behavior immediately
-                    await self.simulate_human_behavior(page)
+                    await run_with_depth_deadline(depth, self.simulate_human_behavior(page), "human simulation")
 
-                    # Try to wait for network to settle (useful for heavy SPAs)
                     try:
-                        await page.wait_for_load_state("networkidle", timeout=10000)
-                    except:
-                        pass # Continue even if network is busy
+                        await run_with_depth_deadline(
+                            depth,
+                            page.wait_for_load_state("networkidle", timeout=10000),
+                            "network idle wait"
+                        )
+                    except asyncio.TimeoutError:
+                        pass
 
-                    # Fixed wait to ensure rendering
-                    await asyncio.sleep(3)
+                    await run_with_depth_deadline(depth, asyncio.sleep(3), "post-load wait")
                     
-                    # 0. Try to handle Cookie Consent Popup
-                    await self.handle_cookie_consent(page)
+                    await run_with_depth_deadline(depth, self.handle_cookie_consent(page), "cookie consent handling")
 
-                    # Auto-scroll to trigger lazy loading
-                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    await asyncio.sleep(2) 
+                    await run_with_depth_deadline(depth, page.evaluate("window.scrollTo(0, document.body.scrollHeight)"), "scrolling")
+                    await run_with_depth_deadline(depth, asyncio.sleep(2), "scroll wait")
                 except Exception as e:
                     print(f"{Fore.YELLOW}[!] Timeout/Error loading {current_url}: {e}{Style.RESET_ALL}")
                     await page.close()
@@ -371,12 +386,20 @@ class SiteScanner:
                 # Logic: Use AI only if DOM detection fails AND page is high priority
                 
                 # First pass: DOM Detection only
-                detections = await self.detector.detect(page, current_url, use_ai=False)
+                detections = await run_with_depth_deadline(
+                    depth,
+                    self.detector.detect(page, current_url, use_ai=False),
+                    "DOM detection"
+                )
                 
                 # Second pass: AI Vision (if no detections and high priority and AI enabled)
                 if not detections and self.use_ai and self.get_priority_score(current_url) > 1:
                     print(f"{Fore.YELLOW}[~] Checking with AI Vision...{Style.RESET_ALL}")
-                    detections = await self.detector.detect(page, current_url, use_ai=True)
+                    detections = await run_with_depth_deadline(
+                        depth,
+                        self.detector.detect(page, current_url, use_ai=True),
+                        "AI detection"
+                    )
 
                 if detections:
                     print(f"{Fore.RED}[!] CAPTCHA FOUND at {current_url}{Style.RESET_ALL}")
@@ -388,7 +411,11 @@ class SiteScanner:
 
                 # 2. Crawl for more links if depth allows
                 if depth < self.max_depth:
-                    links = await page.locator('a').evaluate_all("els => els.map(e => e.href)")
+                    links = await run_with_depth_deadline(
+                        depth,
+                        page.locator('a').evaluate_all("els => els.map(e => e.href)"),
+                        "link extraction"
+                    )
                     
                     for link in links:
                         link = (link or "").split('#')[0].strip()
@@ -412,6 +439,9 @@ class SiteScanner:
                     
                 pages_scanned += 1
 
+            except asyncio.TimeoutError:
+                await page.close()
+                continue
             except Exception as e:
                 print(f"{Fore.YELLOW}[!] Error processing {current_url}: {str(e)}{Style.RESET_ALL}")
             finally:
@@ -451,5 +481,5 @@ if __name__ == "__main__":
     else:
         print(f"{Fore.YELLOW}[INFO] AI Vision Disabled (No API Key found). Using DOM detection only.{Style.RESET_ALL}")
 
-    scanner = SiteScanner("urls.txt", max_depth=3, max_pages=50, use_ai=use_ai_vision, depth_timeout=60)
+    scanner = SiteScanner("urls.txt", max_depth=3, max_pages=50, use_ai=use_ai_vision, depth_timeout=120)
     asyncio.run(scanner.run())
