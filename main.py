@@ -153,10 +153,21 @@ class SiteScanner:
     def read_urls(self):
         try:
             with open(self.input_file, 'r') as f:
-                return [line.strip() for line in f if line.strip()]
+                raw_urls = [line.strip() for line in f if line.strip()]
         except FileNotFoundError:
             print(f"{Fore.RED}Error: File {self.input_file} not found.{Style.RESET_ALL}")
             return []
+
+        normalized_seen = set()
+        cleaned_urls = []
+        for url in raw_urls:
+            prepared = url if url.startswith(('http://', 'https://')) else f'https://{url}'
+            normalized = self.normalize_url(prepared)
+            if normalized in normalized_seen:
+                continue
+            normalized_seen.add(normalized)
+            cleaned_urls.append(prepared)
+        return cleaned_urls
 
     def save_found_url(self, url: str):
         # Avoid duplicates in output file
