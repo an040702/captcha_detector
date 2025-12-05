@@ -138,11 +138,11 @@ class CaptchaDetector:
         return results
 
 class SiteScanner:
-    def __init__(self, input_file: str, max_depth: int = 2, max_pages: int = 20, use_ai: bool = False, site_timeout: int = 60):
+    def __init__(self, input_file: str, max_depth: int = 2, max_pages: int = 20, use_ai: bool = False, depth_timeout: int = 60):
         self.input_file = input_file
         self.max_depth = max_depth
         self.max_pages_per_site = max_pages
-        self.site_timeout = site_timeout  # seconds per root site
+        self.depth_timeout = depth_timeout  # seconds per depth level
         self.visited_urls = set()
         self.detector = CaptchaDetector()
         self.output_file = "captcha_found.txt"
@@ -292,18 +292,25 @@ class SiteScanner:
         
         site_visited = set()
         pages_scanned = 0
-        site_start_time = time.time()
+        depth_start_times = {}
+        depth_timed_out = set()
         
         print(f"\n{Fore.MAGENTA}=== Starting Deep Scan for: {start_url} ==={Style.RESET_ALL}")
 
         while not queue.empty() and pages_scanned < self.max_pages_per_site:
-            # site timeout check
-            elapsed = time.time() - site_start_time
-            if elapsed > self.site_timeout:
-                print(f"{Fore.YELLOW}[!] Site timeout reached ({self.site_timeout}s). Skipping remaining pages for {start_url}.{Style.RESET_ALL}")
-                break
-
             current_url, depth = await queue.get()
+
+            # depth timeout tracking
+            if depth not in depth_start_times:
+                depth_start_times[depth] = time.time()
+            else:
+                if depth in depth_timed_out:
+                    continue
+                depth_elapsed = time.time() - depth_start_times[depth]
+                if self.depth_timeout and depth_elapsed > self.depth_timeout:
+                    depth_timed_out.add(depth)
+                    print(f"{Fore.YELLOW}[!] Depth {depth} timeout reached ({self.depth_timeout}s). Skipping remaining URLs at this depth.{Style.RESET_ALL}")
+                    continue
             
             # Normalize URL for checking
             normalized_url = self.normalize_url(current_url)
@@ -444,5 +451,5 @@ if __name__ == "__main__":
     else:
         print(f"{Fore.YELLOW}[INFO] AI Vision Disabled (No API Key found). Using DOM detection only.{Style.RESET_ALL}")
 
-    scanner = SiteScanner("urls.txt", max_depth=3, max_pages=50, use_ai=use_ai_vision, site_timeout=120)
+    scanner = SiteScanner("urls.txt", max_depth=3, max_pages=50, use_ai=use_ai_vision, depth_timeout=60)
     asyncio.run(scanner.run())
