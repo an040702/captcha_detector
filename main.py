@@ -120,12 +120,15 @@ class CaptchaDetector:
                 except Exception:
                     continue
 
-        # 2. Text analysis (Simple Heuristic)
+        # 2. Text analysis (Simple Heuristic) – ignore script contents
         try:
-            content = await page.content()
-            if "captcha" in content.lower():
-                results.append("WARNING: Keyword 'captcha' found in HTML source")
-        except:
+            body_locator = page.locator("body")
+            body_text = ""
+            if await body_locator.count() > 0:
+                body_text = await body_locator.inner_text()
+            if "captcha" in body_text.lower():
+                results.append("WARNING: Keyword 'captcha' found in visible text")
+        except Exception:
             pass
 
         # 3. Visual AI Analysis (Fallback if DOM didn't find anything BUT use_ai is True)
